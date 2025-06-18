@@ -9,7 +9,7 @@ const io = new Server(server, {
     origin: '*',
   },
 });
-
+app.use(cors())
 app.use(express.static('.'));
 
 app.get('/', (req, res) => {
