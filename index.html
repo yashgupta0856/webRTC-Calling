@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebRTC Audio Call</title>
+  <style>
+    /* Your existing styles kept as is */
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>WebRTC Audio Call</h2>
+
+    <div id="status" class="status disconnected">Connecting to server...</div>
+
+    <div id="socketIdDisplay" class="socket-id" style="display: none;">
+      <strong>Your Socket ID:</strong> <span id="socketId"></span>
+      <br><small>Share this ID with someone to receive calls</small>
+    </div>
+
+    <div class="audio-controls">
+      <label>Microphone Volume:</label>
+      <input type="range" id="volumeSlider" min="0" max="100" value="50">
+      <button id="muteBtn" onclick="toggleMute()" class="mute-btn">Mute</button>
+    </div>
+
+    <button onclick="startCall()">Start Call</button>
+    <button onclick="copySocketId()">Copy My ID</button>
+
+    <!-- Audio elements -->
+    <audio id="remoteAudio" autoplay></audio>
+    <audio id="localAudio" autoplay muted style="display: none;"></audio>
+
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <script>
+      const socket = io('http://localhost:3000');
+      const peerConnection = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      let localStream;
+      let isMuted = false;
+      let audioContext;
+      let gainNode;
+      let targetUserId;
+
+      const remoteAudio = document.getElementById('remoteAudio');
+      const localAudio = document.getElementById('localAudio');
+
+      socket.on('connect', () => {
+        document.getElementById('status').className = 'status connected';
+        document.getElementById('status').textContent = 'Connected to server';
+        document.getElementById('socketId').textContent = socket.id;
+        document.getElementById('socketIdDisplay').style.display = 'block';
+      });
+
+      socket.on('disconnect', () => {
+        document.getElementById('status').className = 'status disconnected';
+        document.getElementById('status').textContent = 'Disconnected from server';
+        document.getElementById('socketIdDisplay').style.display = 'none';
+      });
+
+      const audioConstraints = {
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 48000,
+          channelCount: 1
+        }
+      };
+
+      navigator.mediaDevices.getUserMedia(audioConstraints)
+        .then(stream => {
+          localStream = stream;
+
+          // Optional: attach local preview (muted)
+          localAudio.srcObject = localStream;
+
+          // Audio processing (volume control)
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          const source = audioContext.createMediaStreamSource(stream);
+          gainNode = audioContext.createGain();
+          gainNode.gain.value = 0.5;
+
+          // Compressor + lowpass filter chain
+          const compressor = audioContext.createDynamicsCompressor();
+          const lowpassFilter = audioContext.createBiquadFilter();
+          compressor.threshold.value = -50;
+          compressor.ratio.value = 12;
+          lowpassFilter.type = 'lowpass';
+          lowpassFilter.frequency.value = 8000;
+
+          source.connect(compressor);
+          compressor.connect(lowpassFilter);
+          lowpassFilter.connect(gainNode);
+          gainNode.connect(audioContext.destination);
+
+          localStream.getTracks().forEach(track => {
+            peerConnection.addTrack(track, localStream);
+          });
+        })
+        .catch(err => {
+          console.error('Mic error:', err);
+          alert('Please allow mic access.');
+        });
+
+      // Volume control
+      document.getElementById('volumeSlider').addEventListener('input', (e) => {
+        if (gainNode) {
+          gainNode.gain.value = e.target.value / 100;
+        }
+      });
+
+      function toggleMute() {
+        if (localStream) {
+          const audioTrack = localStream.getAudioTracks()[0];
+          audioTrack.enabled = !audioTrack.enabled;
+          isMuted = !audioTrack.enabled;
+          const muteBtn = document.getElementById('muteBtn');
+          muteBtn.textContent = isMuted ? 'Unmute' : 'Mute';
+          muteBtn.className = isMuted ? 'mute-btn muted' : 'mute-btn';
+        }
+      }
+
+      socket.on('call-made', async data => {
+        if (confirm(`Incoming call from ${data.from}. Accept?`)) {
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+          const answer = await peerConnection.createAnswer();
+          await peerConnection.setLocalDescription(answer);
+          socket.emit('make-answer', {
+            answer,
+            to: data.from
+          });
+          alert('Call connected!');
+        }
+      });
+
+      socket.on('answer-made', async data => {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+        alert('Call connected!');
+      });
+
+      socket.on('ice-candidate', async data => {
+        try {
+          await peerConnection.addIceCandidate(data.candidate);
+        } catch (e) {
+          console.error(e);
+        }
+      });
+
+      peerConnection.onicecandidate = event => {
+        if (event.candidate) {
+          socket.emit('ice-candidate', {
+            candidate: event.candidate,
+            to: targetUserId
+          });
+        }
+      };
+
+      // 👇 Correct handling of remote stream only
+      peerConnection.ontrack = (event) => {
+        remoteAudio.srcObject = event.streams[0];
+      };
+
+      function startCall() {
+        targetUserId = prompt('Enter socket ID to call:');
+        if (targetUserId) {
+          peerConnection.createOffer()
+            .then(offer => {
+              peerConnection.setLocalDescription(offer);
+              socket.emit('call-user', {
+                offer,
+                to: targetUserId
+              });
+              alert('Calling...');
+            })
+            .catch(err => {
+              console.error('Offer error:', err);
+              alert('Call error');
+            });
+        }
+      }
+
+      function copySocketId() {
+        const socketId = document.getElementById('socketId').textContent;
+        navigator.clipboard.writeText(socketId).then(() => {
+          alert('Socket ID copied!');
+        }).catch(() => {
+          const textArea = document.createElement('textarea');
+          textArea.value = socketId;
+          document.body.appendChild(textArea);
+          textArea.select();
+          document.execCommand('copy');
+          document.body.removeChild(textArea);
+          alert('Socket ID copied!');
+        });
+      }
+    </script>
+  </div>
+</body>
+</html>
